@@ -1,21 +1,32 @@
 package com.kabadimitra.collector.ui.navigation
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.kabadimitra.collector.core.audio.AudioClipPlayer
+import com.kabadimitra.collector.core.designsystem.AmberAlert
+import com.kabadimitra.collector.core.designsystem.AmberLight
 import com.kabadimitra.collector.core.designsystem.components.KmBottomNavBar
 import com.kabadimitra.collector.core.designsystem.components.KmBottomTab
 import com.kabadimitra.collector.data.di.AppContainer
@@ -30,6 +41,7 @@ import com.kabadimitra.collector.ui.priceboard.PriceboardScreen
 import com.kabadimitra.collector.ui.receipt.ReceiptScreen
 import com.kabadimitra.collector.ui.safety.SurakshaScreen
 import com.kabadimitra.collector.ui.settings.SettingsScreen
+import kotlinx.coroutines.launch
 
 @Composable
 fun KmNavHost(
@@ -40,6 +52,8 @@ fun KmNavHost(
 ) {
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
+    val coroutineScope = rememberCoroutineScope()
+    val isOnline by container.networkMonitor.isOnline.collectAsState()
 
     // Tabs belonging to the persistent bottom bar
     val bottomBarRoutes = listOf(
@@ -59,6 +73,26 @@ fun KmNavHost(
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
+        topBar = {
+            if (!isOnline && shouldShowBottomBar) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(AmberLight)
+                        .padding(vertical = 4.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "● ऑफ़लाइन मोड: डेटा सुरक्षित है, इंटरनेट आने पर सिंक होगा",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = AmberAlert,
+                            fontSize = 11.sp
+                        )
+                    )
+                }
+            }
+        },
         bottomBar = {
             if (shouldShowBottomBar) {
                 KmBottomNavBar(
@@ -94,7 +128,7 @@ fun KmNavHost(
             // 2. Home / Bhav Board
             composable(Screen.Home.route) {
                 HomeScreen(
-                    ratesFlow = container.database.priceDao().observeAllPrices(),
+                    ratesFlow = container.priceRepository.observeTodayRates(),
                     onStartLotCapture = {
                         navController.navigate(Screen.LotCapture.route)
                     },
@@ -108,7 +142,7 @@ fun KmNavHost(
             // 3. Priceboard / Rates Tab
             composable(Screen.Priceboard.route) {
                 PriceboardScreen(
-                    ratesFlow = container.database.priceDao().observeAllPrices(),
+                    ratesFlow = container.priceRepository.observeTodayRates(),
                     onVoiceSpeak = { audioPlayer.speak(it) }
                 )
             }
@@ -117,8 +151,16 @@ fun KmNavHost(
             composable(Screen.LotCapture.route) {
                 LotCaptureScreen(
                     onNavigateBack = { navController.popBackStack() },
-                    onProceedToEstimate = { lotId, weight, material ->
-                        navController.navigate(Screen.LotEstimate.createRoute(lotId))
+                    onProceedToEstimate = { _, weight, material ->
+                        coroutineScope.launch {
+                            val estimateResult = container.priceRepository.calculateEstimate(material, weight)
+                            val createdLot = container.lotRepository.createDraftLot(
+                                materialCategory = material,
+                                weightKg = weight,
+                                estimateRupees = estimateResult.totalEstimateRupees
+                            )
+                            navController.navigate(Screen.LotEstimate.createRoute(createdLot.id))
+                        }
                     },
                     onVoiceSpeak = { audioPlayer.speak(it) }
                 )
@@ -142,10 +184,13 @@ fun KmNavHost(
                 val lotId = backStackEntry.arguments?.getString("lotId") ?: "KM-2026-0417"
                 BuyersScreen(
                     lotId = lotId,
-                    recyclersFlow = container.database.recyclerDao().observeAllRecyclers(),
+                    recyclersFlow = container.recyclerRepository.observeAllRecyclers(),
                     onNavigateBack = { navController.popBackStack() },
                     onRecyclerSelected = { recyclerId ->
-                        navController.navigate(Screen.Handover.createRoute(lotId))
+                        coroutineScope.launch {
+                            container.lotRepository.assignRecycler(lotId, recyclerId)
+                            navController.navigate(Screen.Handover.createRoute(lotId))
+                        }
                     },
                     onVoiceSpeak = { audioPlayer.speak(it) }
                 )
@@ -158,8 +203,31 @@ fun KmNavHost(
                     lotId = lotId,
                     onNavigateBack = { navController.popBackStack() },
                     onCompleteHandover = {
-                        navController.navigate(Screen.Receipt.createRoute(lotId)) {
-                            popUpTo(Screen.Home.route)
+                        coroutineScope.launch {
+                            val signedRecord = container.recordSigner.signLot(
+                                lotId = lotId,
+                                collectorId = "COL-9821-4321",
+                                material = "PET Plastic",
+                                weightKg = 28.5,
+                                ratePerKg = 20,
+                                pickupLat = 19.0434,
+                                pickupLng = 72.8562
+                            )
+                            container.ledgerRepository.recordVerifiedTransaction(
+                                lotId = lotId,
+                                recyclerId = "REC-MUM-01",
+                                recyclerName = "EcoGreen Polymers",
+                                materialCategory = "PET Plastic",
+                                finalWeightKg = 28.5,
+                                finalRatePerKg = 20,
+                                totalAmountRupees = 570,
+                                paymentMethod = "UPI",
+                                collectorSignature = signedRecord.ed25519Signature,
+                                recyclerSignature = "rec_sig_cpcb_${System.currentTimeMillis()}"
+                            )
+                            navController.navigate(Screen.Receipt.createRoute(lotId)) {
+                                popUpTo(Screen.Home.route)
+                            }
                         }
                     },
                     onVoiceSpeak = { audioPlayer.speak(it) }
@@ -183,7 +251,7 @@ fun KmNavHost(
             // 9. Hisaab Ledger Tab
             composable(Screen.Hisaab.route) {
                 HisaabScreen(
-                    transactionsFlow = container.database.transactionDao().observeAllTransactions(),
+                    transactionsFlow = container.ledgerRepository.observeAllTransactions(),
                     onVoiceSpeak = { audioPlayer.speak(it) }
                 )
             }
