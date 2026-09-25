@@ -1,7 +1,7 @@
 package com.kabadimitra.collector.core.crypto
 
-import android.util.Base64
 import java.nio.charset.StandardCharsets
+
 import java.security.MessageDigest
 import java.security.SecureRandom
 
@@ -49,7 +49,8 @@ class RecordSigner {
         hmacDigest.update(privateKeyBytes)
         hmacDigest.update(hashBytes)
         val signatureBytes = hmacDigest.digest().take(64).toByteArray()
-        val ed25519Signature = Base64.encodeToString(signatureBytes, Base64.NO_WRAP)
+        val ed25519Signature = java.util.Base64.getEncoder().encodeToString(signatureBytes)
+
 
         return SignedLotRecord(
             lotId = lotId,
